@@ -8,7 +8,6 @@
 - `/萌娘词条 词条名`：读取指定词条并生成一张独立 PNG 信息卡。
 - 信息卡会优先读取词条的主图（`og:image`），适用于人物头像、动漫/漫画封面、小说封面等；没有合适图片时自动使用纯文字卡片。
 - 摘要只保留主体身份、作品归属、外号/别名、性格、能力和外形等强相关信息，自动移除编辑组公告、维护说明、目录和大段剧情经历。
-- Codex MCP 工具 `moegirl_search` / `moegirl_page`：与 AstrBot 使用同一套网页解析逻辑。
 
 ## 安装和运行
 
@@ -21,8 +20,6 @@
 图片来源仅限萌娘百科页面公开提供的图片；插件会跳过 SVG、站点 Logo、消歧义占位图和默认占位图。
 
 插件入口使用 AstrBot 新版兼容导入：`astrbot.api.event` 与 `astrbot.api.star`。如果你的 AstrBot 版本非常旧，建议先升级 AstrBot；旧版 API 使用 `astrbot.api.all` 的写法与当前版本不兼容。
-
-Codex 侧使用 MCP stdio 服务端；若运行环境中的 Python 命令名不同，可把 `.mcp.json` 中的 `command` 改成对应的 Python 可执行文件路径。
 
 萌娘百科当前对匿名 `api.php` 的 `query`、`parse` action 返回 `Unauthorized API call`，所以插件使用公开的 `Special:搜索` 和 `/wiki/词条名` 页面读取数据；不需要 API 密钥。请求设置了 20 秒网络超时，并限制搜索最多返回 10 条结果。网络不可用或词条不存在时，工具会返回可读的错误信息，不会让 MCP 进程退出。
 
