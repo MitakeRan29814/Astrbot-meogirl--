@@ -162,6 +162,32 @@ def _clean_html_fragment(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip(" 、\t\r\n")
 
 
+def _normalize_profile_value(label: str, value: str) -> str:
+    """Remove citations and template commentary from a profile value."""
+    value = re.sub(r"\[[^\]]+\]", "", value)
+    value = re.sub(r"\s+", " ", value).strip(" 、，,；;。")
+    measurement_labels = {"三围", "三围尺寸", "BWH"}
+    if label in measurement_labels:
+        # Prefer an explicit B/W/H form and discard citation markers.
+        bwh = re.search(
+            r"B\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\D+"
+            r"W\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\D+"
+            r"H\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)",
+            value, re.I,
+        )
+        if bwh:
+            return f"B:{bwh.group(1)} / W:{bwh.group(2)} / H:{bwh.group(3)}"
+        # Chinese entries sometimes include cup/band notes such as
+        # “86.8（68.2底围）70E/58.7/84.8”. Keep only the three measurements.
+        plain = re.sub(r"（[^）]*）|\([^)]*\)", "", value)
+        numbers = re.findall(r"[0-9]+(?:\.[0-9]+)?", plain)
+        if re.search(r"[0-9]+(?:\.[0-9]+)?[A-G]", plain, re.I) and len(numbers) >= 4:
+            numbers = [numbers[0], numbers[-2], numbers[-1]]
+        if len(numbers) >= 3:
+            return " / ".join(numbers[:3])
+    return value[:120]
+
+
 def _extract_profile(source: str) -> dict[str, str]:
     """Extract only character/work facts from the page infobox."""
     labels = {
@@ -184,7 +210,7 @@ def _extract_profile(source: str) -> dict[str, str]:
         label = re.sub(r"[：:]$", "", _clean_html_fragment(cells[0]))
         if label not in labels:
             continue
-        value = _clean_html_fragment(" ".join(cells[1:]))
+        value = _normalize_profile_value(label, _clean_html_fragment(" ".join(cells[1:])))
         if label == "本名":
             value = re.sub(r"\s*\(.*?\)", "", value).strip()
         if label in {"别号", "别名"}:
@@ -201,7 +227,7 @@ def _extract_profile(source: str) -> dict[str, str]:
     )
     for raw_label, raw_value in flex_rows:
         label = re.sub(r"[：:]$", "", _clean_html_fragment(raw_label))
-        value = _clean_html_fragment(raw_value)
+        value = _normalize_profile_value(label, _clean_html_fragment(raw_value))
         if label not in labels or not value or label in profile:
             continue
         if label in {"别号", "别名"}:
@@ -220,7 +246,7 @@ def _extract_profile(source: str) -> dict[str, str]:
         ]
         values = [value for _, value in measurements if value]
         if len(values) >= 2:
-            profile["三围"] = " / ".join(values)
+            profile["三围"] = _normalize_profile_value("三围", " / ".join(values))
     return profile
 
 
@@ -253,11 +279,6 @@ def _page_url(title: str) -> str:
 def _profile_summary(title: str, profile: dict[str, str], fallback: str) -> str:
     """Build a short description from the extracted subject traits."""
     parts: list[str] = []
-    if profile.get("本名"):
-        parts.append(f"本名为{profile['本名']}")
-    aliases = profile.get("别号") or profile.get("别名")
-    if aliases:
-        parts.append(f"常用别号：{aliases}")
     visual = []
     if profile.get("发色"):
         visual.append(profile["发色"])
@@ -271,8 +292,20 @@ def _profile_summary(title: str, profile: dict[str, str], fallback: str) -> str:
         group = profile.get("所属团体") or profile.get("现所属团体")
         role = profile.get("职业")
         parts.append(f"身份为{role or '角色'}，所属{group}")
+    if profile.get("学校"):
+        parts.append(f"就读于{profile['学校']}")
+    context = _compact_summary(fallback)
+    for sentence in re.split(r"(?<=[。！？!?])", context):
+        sentence = sentence.strip("。！？!? \t\r\n")
+        if len(sentence) < 8:
+            continue
+        if any(sentence in part or part in sentence for part in parts):
+            continue
+        parts.append(sentence)
+        if len(parts) >= 5:
+            break
     if parts:
-        return "。".join(parts[:3]) + "。"
+        return "。".join(parts[:4]) + "。"
     return _compact_summary(fallback)
 
 
@@ -465,14 +498,16 @@ def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_u
         media_width = max(1, round(media_height * cover.width / max(1, cover.height)))
         media_left = margin + (width - margin * 2 - media_width) // 2
         portrait_box = (media_left, media_top, media_left + media_width, media_top + media_height)
-        body_width = media_width
+        # The image is centered above the content; the table and description
+        # below it use the complete card width.
+        body_width = width - margin * 2
     else:
         media_width = media_height = 0
         portrait_box = None
         body_width = width - margin * 2
-    # Keep the lower description as a compact cue, not a second encyclopedia
-    # article. The structured rows above carry the detailed traits.
-    body_lines = _wrap_text(summary or "暂无可提取的主体特征。", body_font, body_width)[:3]
+    # Keep several concise lines of subject traits.  They are measured before
+    # creating the canvas so the footer always remains inside the image.
+    feature_lines = _wrap_text(summary or "暂无可提取的主体特征。", body_font, width - margin * 2)[:5]
     row_height = 48
     # Measure every row before creating the canvas. This prevents long traits
     # from pushing the footer past the bottom edge or into the image column.
@@ -484,7 +519,7 @@ def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_u
     content_bottom = portrait_box[3] if portrait_box else media_top
     table_start = media_top if vertical or cover is None else portrait_box[3] + 34
     table_bottom = table_start + 42 + table_height + 20 if measured_rows else table_start
-    summary_bottom = max(table_bottom, content_bottom) + 42 + len(body_lines) * 42 + 120
+    summary_bottom = max(table_bottom, content_bottom) + 42 + len(feature_lines) * 42 + 190
     height = max(900, summary_bottom + 36)
     image = Image.new("RGB", (width, height), "#101827")
     draw = ImageDraw.Draw(image)
@@ -522,10 +557,15 @@ def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_u
                 draw.text((margin + 188, y + 8 + index * 27), line, font=small_font, fill="#e7f0f6")
             y += row_h
         y += 20
-    draw.text((margin, y), "主体特点", font=label_font, fill="#73d8f5")
+    # A centered media layout uses the full card width for the description.
+    # This keeps the feature text flat under the image instead of leaving it
+    # trapped in the narrow left column.
+    feature_left = margin
+    feature_width = width - margin * 2
+    draw.text((feature_left, y), "主体特点", font=label_font, fill="#73d8f5")
     y += 42
-    for line in body_lines:
-        draw.text((margin, y), line, font=body_font, fill="#d8e5f2")
+    for line in feature_lines:
+        draw.text((feature_left, y), line, font=body_font, fill="#d8e5f2")
         y += 42
     draw.line((margin, y + 12, width - margin, y + 12), fill="#38506b", width=2)
     draw.text((margin, y + 38), "来源：萌娘百科", font=small_font, fill="#9fc1d8")
@@ -550,7 +590,7 @@ def _argument(message: str, command: str) -> str:
     return value
 
 
-@register("astrbot_plugin_moegirl", "Local developer", "萌娘百科主体档案卡", "1.7.0")
+@register("astrbot_plugin_moegirl", "Local developer", "萌娘百科主体档案卡", "1.10.0")
 class MoegirlPlugin(Star):
     """Provide /萌娘搜索 and /萌娘词条 commands."""
 
