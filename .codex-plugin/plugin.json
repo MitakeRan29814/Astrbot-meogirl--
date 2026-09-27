@@ -1,7 +1,7 @@
 {
   "name": "astrobot-moegirl",
-  "version": "1.2.0",
-  "description": "AstrBot Moegirl subject lookup plugin that generates standalone PNG information cards with page images.",
+  "version": "1.4.0",
+  "description": "AstrBot Moegirl subject profile cards with structured traits, aliases, and adaptive image layouts.",
   "author": {
     "name": "Local developer"
   },

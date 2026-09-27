@@ -145,7 +145,7 @@ def page_html(title: str, include_source: bool = True) -> dict[str, Any]:
         raise RuntimeError(f"未找到词条：{title}")
     match = re.search(r"<title>\s*(.*?)\s+-\s+萌娘百科", source, re.I | re.S)
     actual_title = html.unescape(match.group(1).strip()) if match else title
-    result = {"title": actual_title, "summary": clean_wikitext("".join(parser.parts))[:MAX_RESULT_CHARS]}
+    result = {"title": actual_title, "summary": compact_summary(clean_wikitext("".join(parser.parts)))}
     if include_source:
         result["url"] = page_url(actual_title)
     return result
@@ -164,6 +164,43 @@ def clean_wikitext(value: str) -> str:
     value = html.unescape(value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
+
+
+def compact_summary(value: str, limit: int = 460) -> str:
+    noise = (
+        "编辑组", "编辑前请", "条目编辑", "编辑规范", "使用指南", "Wiki入门",
+        "诚邀", "欢迎正在阅读", "欢迎加入", "维护", "投稿", "招募",
+        "公告", "目录", "参考资料", "外部链接", "脚注", "分类:",
+        "模板:", "特殊:", "本页面", "本条目", "祝您在萌娘百科度过愉快的时光", "欢迎阅读", "欢迎来到萌娘百科",
+    )
+    useful = (
+        "是", "为", "来自", "登场", "角色", "人物", "作品",
+        "主角", "主人公", "身份", "所属", "性格", "特点", "特征",
+        "能力", "外貌", "形象", "外号", "别名", "昵称", "本名",
+        "原名", "又名", "称为", "擅长", "喜欢", "讨厌", "种族",
+        "职业", "配音",
+    )
+    story_noise = (
+        "小时候", "幼年", "童年", "后来", "之后", "故事", "剧情",
+        "经历", "学校", "学院", "入学", "毕业", "第几话", "第几集",
+        "某日", "某天", "事件", "回忆", "过去", "得知", "发现", "编辑组",
+    )
+    value = re.sub(r"[ \t]+", " ", value)
+    raw_sentences = re.split(r"(?<=[。！？!?；;])\s*|\n+", value)
+    kept: list[str] = []
+    for raw in raw_sentences:
+        sentence = re.sub(r"^[|!*=：:、·\-]+", "", raw).strip()
+        sentence = re.sub(r"\s+", " ", sentence)
+        if len(sentence) < 6 or any(marker in sentence for marker in noise + story_noise):
+            continue
+        if any(marker in sentence for marker in useful):
+            kept.append(sentence)
+        if len(kept) >= 3:
+            break
+    if not kept:
+        kept = [part.strip() for part in re.split(r"\n+", value) if len(part.strip()) >= 6][:3]
+    summary = "".join(f"{part}。" if not part.endswith(("。", "！", "？", "!", "?")) else part for part in kept)
+    return summary[:360].rstrip("，、；; " ) + ("…" if len(summary) > 360 else "")
 
 
 def page_url(title: str) -> str:

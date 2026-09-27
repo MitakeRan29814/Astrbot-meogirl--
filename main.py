@@ -154,7 +154,46 @@ def _parse_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     return parser.items[: max(1, min(limit, 10))]
 
 
-def _parse_page(title: str) -> tuple[str, str, str]:
+def _clean_html_fragment(value: str) -> str:
+    value = re.sub(r"<br\s*/?>", "、", value, flags=re.I)
+    value = re.sub(r"<img[^>]*>", "", value, flags=re.I)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = html.unescape(value)
+    return re.sub(r"\s+", " ", value).strip(" 、\t\r\n")
+
+
+def _extract_profile(source: str) -> dict[str, str]:
+    """Extract only character/work facts from the page infobox."""
+    labels = {
+        "本名", "别号", "别名", "发色", "瞳色", "身高", "年龄", "生日", "星座",
+        "萌点", "活动范围", "现所属团体", "所属团体", "学校", "职业", "种族",
+        "声优", "配音", "代表色",
+    }
+    profile: dict[str, str] = {}
+    # Parse rows from the full page; nested tables in the infobox make a single
+    # outer-table regex unreliable, while the label allow-list keeps this scoped.
+    area = source
+    for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", area, re.I | re.S):
+        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.I | re.S)
+        if len(cells) < 2:
+            continue
+        label = re.sub(r"[：:]$", "", _clean_html_fragment(cells[0]))
+        if label not in labels:
+            continue
+        value = _clean_html_fragment(" ".join(cells[1:]))
+        if label == "本名":
+            value = re.sub(r"\s*\(.*?\)", "", value).strip()
+        if label in {"别号", "别名"}:
+            value = value.replace("<del>", "").replace("</del>", "")
+        if label == "萌点":
+            value = "、".join(part.strip() for part in value.split("、") if part.strip()[:1] not in {"一"})
+            value = "、".join(value.split("、")[:8])
+        if value and label not in profile:
+            profile[label] = value[:120]
+    return profile
+
+
+def _parse_page(title: str) -> tuple[str, str, str, dict[str, str]]:
     path = "/index.php?" + urlencode({"title": title.replace(" ", "_")})
     parser = _PageParser()
     source = _fetch_html(path)
@@ -172,7 +211,7 @@ def _parse_page(title: str) -> tuple[str, str, str]:
             continue
         image_url = candidate_url
         break
-    return actual_title, text[:8000], image_url
+    return actual_title, _compact_summary(text), image_url, _extract_profile(source)
 
 
 def _page_url(title: str) -> str:
@@ -194,6 +233,45 @@ def _clean_wikitext(value: str) -> str:
     value = re.sub(r"^\s*=+\s*(.*?)\s*=+\s*$", r"\1", value, flags=re.M)
     value = html.unescape(value)
     return re.sub(r"\n{3,}", "\n\n", value).strip()
+
+
+def _compact_summary(value: str, limit: int = 460) -> str:
+    """Keep subject facts and discard wiki maintenance/editorial noise."""
+    noise = (
+        "编辑组", "编辑前请", "条目编辑", "编辑规范", "使用指南",
+        "Wiki入门", "诚邀", "欢迎正在阅读", "欢迎加入", "维护",
+        "投稿", "招募", "公告", "目录", "参考资料", "外部链接",
+        "脚注", "分类:", "模板:", "特殊:", "本页面", "本条目",
+        "祝您在萌娘百科度过愉快的时光", "欢迎阅读", "欢迎来到萌娘百科",
+    )
+    useful = (
+        "是", "为", "来自", "登场", "角色", "人物", "作品",
+        "主角", "主人公", "身份", "所属", "性格", "特点",
+        "特征", "能力", "外貌", "形象", "外号", "别名",
+        "昵称", "本名", "原名", "又名", "称为", "擅长",
+        "喜欢", "讨厌", "种族", "职业", "配音",
+    )
+    story_noise = (
+        "小时候", "幼年", "童年", "后来", "之后", "故事", "剧情",
+        "经历", "学校", "学院", "入学", "毕业", "第几话", "第几集",
+        "某日", "某天", "事件", "回忆", "过去", "得知", "发现", "编辑组",
+    )
+    value = re.sub(r"[ \t]+", " ", value)
+    raw_sentences = re.split(r"(?<=[。！？!?；;])\s*|\n+", value)
+    kept: list[str] = []
+    for raw in raw_sentences:
+        sentence = re.sub(r"^[|!*=：:、·\-]+", "", raw).strip()
+        sentence = re.sub(r"\s+", " ", sentence)
+        if len(sentence) < 6 or any(marker in sentence for marker in noise + story_noise):
+            continue
+        if any(marker in sentence for marker in useful):
+            kept.append(sentence)
+        if len(kept) >= 3:
+            break
+    if not kept:
+        kept = [part.strip() for part in re.split(r"\n+", value) if len(part.strip()) >= 6][:3]
+    summary = "".join(f"{part}。" if not part.endswith(("。", "！", "？", "!", "?")) else part for part in kept)
+    return summary[:360].rstrip("，、；; " ) + ("…" if len(summary) > 360 else "")
 
 
 def _search(query: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -221,7 +299,7 @@ def _pick_subject(query: str, results: list[dict[str, Any]]) -> dict[str, Any] |
     return candidates[0]
 
 
-def _page(title: str) -> tuple[str, str, str]:
+def _page(title: str) -> tuple[str, str, str, dict[str, str]]:
     return _parse_page(title)
 
 
@@ -275,13 +353,22 @@ def _download_image(image_url: str) -> Image.Image | None:
         return None
 
 
-def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_url: str = "") -> str:
+def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_url: str = "", profile: dict[str, str] | None = None) -> str:
     width, margin = 1200, 72
     title_font, label_font, body_font, small_font = _font(58, True), _font(28), _font(30), _font(22)
-    body_lines = _wrap_text(summary or "暂无可提取的简介。", body_font, width - margin * 2)[:16]
+    profile = profile or {}
+    profile_order = ["本名", "别号", "别名", "发色", "瞳色", "身高", "年龄", "生日", "星座", "萌点", "所属团体", "现所属团体", "声优", "配音", "职业"]
+    profile_rows = [(label, profile[label]) for label in profile_order if profile.get(label)]
     cover = _download_image(image_url)
-    cover_height = 320 if cover is not None else 0
-    height = 230 + cover_height + len(body_lines) * 48 + 150
+    vertical = cover is not None and cover.height > cover.width * 1.15
+    body_width = 650 if vertical else width - margin * 2
+    body_lines = _wrap_text(summary or "暂无可提取的主体特征。", body_font, body_width)[:7]
+    row_height = 48
+    table_height = min(len(profile_rows), 12) * row_height
+    if vertical:
+        height = 330 + max(table_height + len(body_lines) * 42 + 120, 560)
+    else:
+        height = 250 + (300 if cover is not None else 0) + table_height + len(body_lines) * 42 + 170
     image = Image.new("RGB", (width, height), "#101827")
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((24, 24, width - 24, height - 24), radius=30, fill="#17243a", outline="#4cc9f0", width=3)
@@ -290,16 +377,39 @@ def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_u
     draw.rounded_rectangle((margin, 160, margin + 150, 204), radius=18, fill="#276b80")
     draw.text((margin + 22, 168), kind, font=label_font, fill="#dff8ff")
     y = 250
-    if cover is not None:
+    if cover is not None and not vertical:
+        cover_height = 300
         cover_box = (margin, y, width - margin, y + cover_height)
         fitted = ImageOps.fit(cover, (cover_box[2] - cover_box[0], cover_box[3] - cover_box[1]), method=Image.Resampling.LANCZOS)
         image.paste(fitted, (cover_box[0], cover_box[1]))
         draw = ImageDraw.Draw(image)
         draw.rectangle(cover_box, outline="#4cc9f0", width=3)
         y += cover_height + 34
+    if cover is not None and vertical:
+        cover_box = (width - margin - 420, 250, width - margin, 250 + 560)
+        fitted = ImageOps.fit(cover, (cover_box[2] - cover_box[0], cover_box[3] - cover_box[1]), method=Image.Resampling.LANCZOS)
+        image.paste(fitted, (cover_box[0], cover_box[1]))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(cover_box, outline="#4cc9f0", width=3)
+        body_width = cover_box[0] - margin - 28
+    if profile_rows:
+        draw.text((margin, y), "主体特征", font=label_font, fill="#73d8f5")
+        y += 42
+        for label, value in profile_rows[:12]:
+            value_lines = _wrap_text(value, small_font, body_width - 190)[:2]
+            row_h = max(row_height, len(value_lines) * 28 + 12)
+            draw.rectangle((margin, y, margin + 170, y + row_h), fill="#276b80", outline="#38506b", width=2)
+            draw.rectangle((margin + 170, y, margin + body_width, y + row_h), fill="#1d3048", outline="#38506b", width=2)
+            draw.text((margin + 16, y + 10), label, font=small_font, fill="#dff8ff")
+            for index, line in enumerate(value_lines):
+                draw.text((margin + 188, y + 8 + index * 27), line, font=small_font, fill="#e7f0f6")
+            y += row_h
+        y += 20
+    draw.text((margin, y), "主体特点", font=label_font, fill="#73d8f5")
+    y += 42
     for line in body_lines:
         draw.text((margin, y), line, font=body_font, fill="#d8e5f2")
-        y += 48
+        y += 42
     draw.line((margin, y + 12, width - margin, y + 12), fill="#38506b", width=2)
     draw.text((margin, y + 38), "来源：萌娘百科", font=small_font, fill="#9fc1d8")
     draw.text((margin, y + 76), url[:95], font=small_font, fill="#72d6f5")
@@ -323,7 +433,7 @@ def _argument(message: str, command: str) -> str:
     return value
 
 
-@register("astrbot_plugin_moegirl", "Local developer", "萌娘百科主体图文卡", "1.2.0")
+@register("astrbot_plugin_moegirl", "Local developer", "萌娘百科主体档案卡", "1.4.0")
 class MoegirlPlugin(Star):
     """Provide /萌娘搜索 and /萌娘词条 commands."""
 
@@ -342,8 +452,8 @@ class MoegirlPlugin(Star):
             if item is None:
                 yield event.plain_result(f"萌娘百科没有找到“{query}”的主体词条。")
                 return
-            title, summary, image_url = await asyncio.to_thread(_page, item["title"])
-            image_path = await asyncio.to_thread(_make_card, title, summary, _page_url(title), "主体", image_url)
+            title, summary, image_url, profile = await asyncio.to_thread(_page, item["title"])
+            image_path = await asyncio.to_thread(_make_card, title, summary, _page_url(title), "主体", image_url, profile)
             try:
                 yield event.image_result(image_path)
             finally:
@@ -361,8 +471,8 @@ class MoegirlPlugin(Star):
             yield event.plain_result("用法：/萌娘词条 词条名")
             return
         try:
-            actual_title, summary, image_url = await asyncio.to_thread(_page, title)
-            image_path = await asyncio.to_thread(_make_card, actual_title, summary, _page_url(actual_title), "词条", image_url)
+            actual_title, summary, image_url, profile = await asyncio.to_thread(_page, title)
+            image_path = await asyncio.to_thread(_make_card, actual_title, summary, _page_url(actual_title), "词条", image_url, profile)
             try:
                 yield event.image_result(image_path)
             finally:
