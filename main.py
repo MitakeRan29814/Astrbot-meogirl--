@@ -353,6 +353,21 @@ def _download_image(image_url: str) -> Image.Image | None:
         return None
 
 
+def _paste_contain(canvas: Image.Image, source: Image.Image, frame: tuple[int, int, int, int],
+                   background: str = "#0d1828") -> None:
+    """Place an image inside a frame without cropping any part of it."""
+    left, top, right, bottom = frame
+    frame_width, frame_height = right - left, bottom - top
+    # Draw the frame first so portrait images have intentional, balanced side
+    # margins and landscape images have intentional top/bottom letterboxing.
+    canvas.paste(background, (left, top, right, bottom))
+    contained = ImageOps.contain(source, (frame_width - 12, frame_height - 12),
+                                 method=Image.Resampling.LANCZOS)
+    x = left + (frame_width - contained.width) // 2
+    y = top + (frame_height - contained.height) // 2
+    canvas.paste(contained, (x, y))
+
+
 def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_url: str = "", profile: dict[str, str] | None = None) -> str:
     width, margin = 1200, 72
     title_font, label_font, body_font, small_font = _font(58, True), _font(28), _font(30), _font(22)
@@ -361,14 +376,27 @@ def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_u
     profile_rows = [(label, profile[label]) for label in profile_order if profile.get(label)]
     cover = _download_image(image_url)
     vertical = cover is not None and cover.height > cover.width * 1.15
-    body_width = 650 if vertical else width - margin * 2
-    body_lines = _wrap_text(summary or "暂无可提取的主体特征。", body_font, body_width)[:7]
+    media_top = 250
+    # The portrait begins on the first table-row baseline, not on the section
+    # heading. This makes the visual columns read as one aligned profile card.
+    portrait_top = media_top + 42
+    portrait_box = (width - margin - 420, portrait_top, width - margin, portrait_top + 560)
+    body_width = portrait_box[0] - margin - 28 if vertical else width - margin * 2
+    # Keep the lower description as a compact cue, not a second encyclopedia
+    # article. The structured rows above carry the detailed traits.
+    body_lines = _wrap_text(summary or "暂无可提取的主体特征。", body_font, body_width)[:3]
     row_height = 48
-    table_height = min(len(profile_rows), 12) * row_height
-    if vertical:
-        height = 330 + max(table_height + len(body_lines) * 42 + 120, 560)
-    else:
-        height = 250 + (300 if cover is not None else 0) + table_height + len(body_lines) * 42 + 170
+    # Measure every row before creating the canvas. This prevents long traits
+    # from pushing the footer past the bottom edge or into the image column.
+    measured_rows: list[tuple[str, list[str], int]] = []
+    for label, value in profile_rows[:12]:
+        value_lines = _wrap_text(value, small_font, body_width - 190)[:2]
+        measured_rows.append((label, value_lines, max(row_height, len(value_lines) * 28 + 12)))
+    table_height = sum(item[2] for item in measured_rows)
+    content_bottom = portrait_box[3] if vertical else media_top + (334 if cover is not None else 0)
+    table_bottom = media_top + 42 + table_height + 20 if measured_rows else media_top
+    summary_bottom = max(table_bottom, content_bottom) + 42 + len(body_lines) * 42 + 120
+    height = max(900, summary_bottom + 36)
     image = Image.new("RGB", (width, height), "#101827")
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((24, 24, width - 24, height - 24), radius=30, fill="#17243a", outline="#4cc9f0", width=3)
@@ -376,28 +404,29 @@ def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_u
     draw.text((margin, 78), title[:28], font=title_font, fill="#f7fbff")
     draw.rounded_rectangle((margin, 160, margin + 150, 204), radius=18, fill="#276b80")
     draw.text((margin + 22, 168), kind, font=label_font, fill="#dff8ff")
-    y = 250
+    y = media_top
     if cover is not None and not vertical:
+        # Works/cover art stays in a centered, wide frame.  contain() keeps the
+        # full cover visible instead of cutting off its title or characters.
         cover_height = 300
         cover_box = (margin, y, width - margin, y + cover_height)
-        fitted = ImageOps.fit(cover, (cover_box[2] - cover_box[0], cover_box[3] - cover_box[1]), method=Image.Resampling.LANCZOS)
-        image.paste(fitted, (cover_box[0], cover_box[1]))
+        _paste_contain(image, cover, cover_box)
         draw = ImageDraw.Draw(image)
-        draw.rectangle(cover_box, outline="#4cc9f0", width=3)
+        draw.rounded_rectangle(cover_box, radius=14, outline="#4cc9f0", width=3)
         y += cover_height + 34
     if cover is not None and vertical:
-        cover_box = (width - margin - 420, 250, width - margin, 250 + 560)
-        fitted = ImageOps.fit(cover, (cover_box[2] - cover_box[0], cover_box[3] - cover_box[1]), method=Image.Resampling.LANCZOS)
-        image.paste(fitted, (cover_box[0], cover_box[1]))
+        # Portrait character art is a separate right-hand media column.  The
+        # The portrait shares the first data-row baseline and never overlaps
+        # the table, so the subject remains visually anchored to its facts.
+        cover_box = portrait_box
+        _paste_contain(image, cover, cover_box)
         draw = ImageDraw.Draw(image)
-        draw.rectangle(cover_box, outline="#4cc9f0", width=3)
+        draw.rounded_rectangle(cover_box, radius=14, outline="#4cc9f0", width=3)
         body_width = cover_box[0] - margin - 28
     if profile_rows:
         draw.text((margin, y), "主体特征", font=label_font, fill="#73d8f5")
         y += 42
-        for label, value in profile_rows[:12]:
-            value_lines = _wrap_text(value, small_font, body_width - 190)[:2]
-            row_h = max(row_height, len(value_lines) * 28 + 12)
+        for label, value_lines, row_h in measured_rows:
             draw.rectangle((margin, y, margin + 170, y + row_h), fill="#276b80", outline="#38506b", width=2)
             draw.rectangle((margin + 170, y, margin + body_width, y + row_h), fill="#1d3048", outline="#38506b", width=2)
             draw.text((margin + 16, y + 10), label, font=small_font, fill="#dff8ff")
@@ -433,7 +462,7 @@ def _argument(message: str, command: str) -> str:
     return value
 
 
-@register("astrbot_plugin_moegirl", "Local developer", "萌娘百科主体档案卡", "1.4.0")
+@register("astrbot_plugin_moegirl", "Local developer", "萌娘百科主体档案卡", "1.5.0")
 class MoegirlPlugin(Star):
     """Provide /萌娘搜索 and /萌娘词条 commands."""
 
