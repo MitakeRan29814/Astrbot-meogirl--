@@ -168,13 +168,17 @@ def _extract_profile(source: str) -> dict[str, str]:
         "本名", "别号", "别名", "发色", "瞳色", "身高", "年龄", "生日", "星座",
         "萌点", "活动范围", "现所属团体", "所属团体", "学校", "职业", "种族",
         "声优", "配音", "代表色",
+        # Body measurements appear under several names across Moegirl
+        # templates. Keep all of them so character pages do not lose BWH data.
+        "三围", "三围尺寸", "BWH", "胸围", "腰围", "臀围",
+        "罩杯", "体重",
     }
     profile: dict[str, str] = {}
-    # Parse rows from the full page; nested tables in the infobox make a single
-    # outer-table regex unreliable, while the label allow-list keeps this scoped.
+    # Parse classic table rows first.  Newer Moegirl templates render the same
+    # fields as two-column flex divs, so handle those rows as a second format.
     area = source
     for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", area, re.I | re.S):
-        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.I | re.S)
+        cells = re.findall(r"<(?:td|th)\b[^>]*>(.*?)</(?:td|th)>", row, re.I | re.S)
         if len(cells) < 2:
             continue
         label = re.sub(r"[：:]$", "", _clean_html_fragment(cells[0]))
@@ -190,6 +194,33 @@ def _extract_profile(source: str) -> dict[str, str]:
             value = "、".join(value.split("、")[:8])
         if value and label not in profile:
             profile[label] = value[:120]
+    flex_rows = re.findall(
+        r"<div[^>]*style\s*=\s*['\"]display:\s*flex;\s*margin:\s*3px 0;[^>]*>"
+        r"\s*<div[^>]*>(.*?)</div>\s*<div[^>]*>(.*?)</div>\s*</div>",
+        area, re.I | re.S,
+    )
+    for raw_label, raw_value in flex_rows:
+        label = re.sub(r"[：:]$", "", _clean_html_fragment(raw_label))
+        value = _clean_html_fragment(raw_value)
+        if label not in labels or not value or label in profile:
+            continue
+        if label in {"别号", "别名"}:
+            value = value.replace("<del>", "").replace("</del>", "")
+        if label == "萌点":
+            value = "、".join(part.strip() for part in value.split("、") if part.strip()[:1] not in {"一"})
+            value = "、".join(value.split("、")[:8])
+        profile[label] = value[:120]
+    # Some templates split B/W/H into three separate rows. Present them as a
+    # single compact trait when a combined 三围 field is absent.
+    if "三围" not in profile and "三围尺寸" not in profile:
+        measurements = [
+            ("胸围", profile.get("胸围")),
+            ("腰围", profile.get("腰围")),
+            ("臀围", profile.get("臀围")),
+        ]
+        values = [value for _, value in measurements if value]
+        if len(values) >= 2:
+            profile["三围"] = " / ".join(values)
     return profile
 
 
@@ -211,11 +242,38 @@ def _parse_page(title: str) -> tuple[str, str, str, dict[str, str]]:
             continue
         image_url = candidate_url
         break
-    return actual_title, _compact_summary(text), image_url, _extract_profile(source)
+    profile = _extract_profile(source)
+    return actual_title, _profile_summary(actual_title, profile, text), image_url, profile
 
 
 def _page_url(title: str) -> str:
     return f"{SITE_URL}wiki/{quote(title.replace(' ', '_'))}"
+
+
+def _profile_summary(title: str, profile: dict[str, str], fallback: str) -> str:
+    """Build a short description from the extracted subject traits."""
+    parts: list[str] = []
+    if profile.get("本名"):
+        parts.append(f"本名为{profile['本名']}")
+    aliases = profile.get("别号") or profile.get("别名")
+    if aliases:
+        parts.append(f"常用别号：{aliases}")
+    visual = []
+    if profile.get("发色"):
+        visual.append(profile["发色"])
+    if profile.get("瞳色"):
+        visual.append(profile["瞳色"])
+    if visual:
+        parts.append(f"外观特征为{'、'.join(visual)}")
+    if profile.get("萌点"):
+        parts.append(f"主要萌点：{profile['萌点']}")
+    if profile.get("职业") or profile.get("所属团体") or profile.get("现所属团体"):
+        group = profile.get("所属团体") or profile.get("现所属团体")
+        role = profile.get("职业")
+        parts.append(f"身份为{role or '角色'}，所属{group}")
+    if parts:
+        return "。".join(parts[:3]) + "。"
+    return _compact_summary(fallback)
 
 
 def _clean_snippet(value: str) -> str:
@@ -368,20 +426,50 @@ def _paste_contain(canvas: Image.Image, source: Image.Image, frame: tuple[int, i
     canvas.paste(contained, (x, y))
 
 
+def _media_size(source: Image.Image, max_width: int, max_height: int | None = None) -> tuple[int, int]:
+    """Return a proportional display size; the returned frame has no letterbox."""
+    scale = max_width / max(1, source.width)
+    if max_height is not None:
+        scale = min(scale, max_height / max(1, source.height))
+    # Small source images can be enlarged to use the available card column,
+    # while the original aspect ratio remains unchanged.
+    return max(1, round(source.width * scale)), max(1, round(source.height * scale))
+
+
+def _paste_media(canvas: Image.Image, source: Image.Image, box: tuple[int, int, int, int]) -> None:
+    """Paste an image into an exact-ratio frame, without black padding."""
+    left, top, right, bottom = box
+    resized = source.resize((right - left, bottom - top), Image.Resampling.LANCZOS)
+    canvas.paste(resized, (left, top))
+
+
 def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_url: str = "", profile: dict[str, str] | None = None) -> str:
     width, margin = 1200, 72
     title_font, label_font, body_font, small_font = _font(58, True), _font(28), _font(30), _font(22)
     profile = profile or {}
-    profile_order = ["本名", "别号", "别名", "发色", "瞳色", "身高", "年龄", "生日", "星座", "萌点", "所属团体", "现所属团体", "声优", "配音", "职业"]
+    profile_order = ["本名", "别号", "别名", "发色", "瞳色", "身高", "体重", "三围", "三围尺寸", "胸围", "腰围", "臀围", "罩杯", "年龄", "生日", "星座", "萌点", "所属团体", "现所属团体", "学校", "种族", "职业", "声优", "配音", "代表色"]
     profile_rows = [(label, profile[label]) for label in profile_order if profile.get(label)]
     cover = _download_image(image_url)
     vertical = cover is not None and cover.height > cover.width * 1.15
     media_top = 250
-    # The portrait begins on the first table-row baseline, not on the section
-    # heading. This makes the visual columns read as one aligned profile card.
-    portrait_top = media_top + 42
-    portrait_box = (width - margin - 420, portrait_top, width - margin, portrait_top + 560)
-    body_width = portrait_box[0] - margin - 28 if vertical else width - margin * 2
+    # Build the media frame from the source aspect ratio. Fixed-height contain
+    # boxes create visible dark bars around transparent character renders.
+    if cover is not None and vertical:
+        media_width, media_height = _media_size(cover, 420, 600)
+        portrait_top = media_top + 42
+        portrait_box = (width - margin - media_width, portrait_top, width - margin, portrait_top + media_height)
+        body_width = portrait_box[0] - margin - 28
+    elif cover is not None:
+        media_width = width - margin * 2
+        media_height = min(360, max(1, round(media_width * cover.height / max(1, cover.width))))
+        media_width = max(1, round(media_height * cover.width / max(1, cover.height)))
+        media_left = margin + (width - margin * 2 - media_width) // 2
+        portrait_box = (media_left, media_top, media_left + media_width, media_top + media_height)
+        body_width = media_width
+    else:
+        media_width = media_height = 0
+        portrait_box = None
+        body_width = width - margin * 2
     # Keep the lower description as a compact cue, not a second encyclopedia
     # article. The structured rows above carry the detailed traits.
     body_lines = _wrap_text(summary or "暂无可提取的主体特征。", body_font, body_width)[:3]
@@ -389,12 +477,13 @@ def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_u
     # Measure every row before creating the canvas. This prevents long traits
     # from pushing the footer past the bottom edge or into the image column.
     measured_rows: list[tuple[str, list[str], int]] = []
-    for label, value in profile_rows[:12]:
+    for label, value in profile_rows[:16]:
         value_lines = _wrap_text(value, small_font, body_width - 190)[:2]
         measured_rows.append((label, value_lines, max(row_height, len(value_lines) * 28 + 12)))
     table_height = sum(item[2] for item in measured_rows)
-    content_bottom = portrait_box[3] if vertical else media_top + (334 if cover is not None else 0)
-    table_bottom = media_top + 42 + table_height + 20 if measured_rows else media_top
+    content_bottom = portrait_box[3] if portrait_box else media_top
+    table_start = media_top if vertical or cover is None else portrait_box[3] + 34
+    table_bottom = table_start + 42 + table_height + 20 if measured_rows else table_start
     summary_bottom = max(table_bottom, content_bottom) + 42 + len(body_lines) * 42 + 120
     height = max(900, summary_bottom + 36)
     image = Image.new("RGB", (width, height), "#101827")
@@ -408,20 +497,19 @@ def _make_card(title: str, summary: str, url: str, kind: str = "词条", image_u
     if cover is not None and not vertical:
         # Works/cover art stays in a centered, wide frame.  contain() keeps the
         # full cover visible instead of cutting off its title or characters.
-        cover_height = 300
-        cover_box = (margin, y, width - margin, y + cover_height)
-        _paste_contain(image, cover, cover_box)
+        cover_box = portrait_box
+        _paste_media(image, cover, cover_box)
         draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle(cover_box, radius=14, outline="#4cc9f0", width=3)
-        y += cover_height + 34
+        draw.rectangle(cover_box, outline="#4cc9f0", width=3)
+        y = cover_box[3] + 34
     if cover is not None and vertical:
         # Portrait character art is a separate right-hand media column.  The
-        # The portrait shares the first data-row baseline and never overlaps
-        # the table, so the subject remains visually anchored to its facts.
+        # The portrait shares the first data-row baseline and uses its own
+        # aspect ratio, so the subject remains visually anchored to its facts.
         cover_box = portrait_box
-        _paste_contain(image, cover, cover_box)
+        _paste_media(image, cover, cover_box)
         draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle(cover_box, radius=14, outline="#4cc9f0", width=3)
+        draw.rectangle(cover_box, outline="#4cc9f0", width=3)
         body_width = cover_box[0] - margin - 28
     if profile_rows:
         draw.text((margin, y), "主体特征", font=label_font, fill="#73d8f5")
@@ -462,7 +550,7 @@ def _argument(message: str, command: str) -> str:
     return value
 
 
-@register("astrbot_plugin_moegirl", "Local developer", "萌娘百科主体档案卡", "1.5.0")
+@register("astrbot_plugin_moegirl", "Local developer", "萌娘百科主体档案卡", "1.7.0")
 class MoegirlPlugin(Star):
     """Provide /萌娘搜索 and /萌娘词条 commands."""
 
