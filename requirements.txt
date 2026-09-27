@@ -1,0 +1,4 @@
+# AstrBot's embedded Python may not have a usable Windows root CA store.
+# Keep HTTPS certificate verification enabled and use certifi's maintained CA bundle.
+certifi>=2023.7.22
+Pillow>=10.0.0

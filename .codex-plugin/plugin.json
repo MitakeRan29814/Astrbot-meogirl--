@@ -1,0 +1,23 @@
+{
+  "name": "astrobot-moegirl",
+  "version": "1.2.0",
+  "description": "AstrBot Moegirl subject lookup plugin that generates standalone PNG information cards with page images.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Astrobot Moegirl",
+    "shortDescription": "Search and read Moegirl Baike entries.",
+    "longDescription": "Query Moegirl Baike from Astrobot-compatible workflows with search, page summaries, and source links.",
+    "developerName": "Local developer",
+    "category": "Information & Reference",
+    "capabilities": ["Search", "Reference"],
+    "defaultPrompt": [
+      "查询萌娘百科的 Astrobot 词条",
+      "搜索萌娘百科并给出词条链接",
+      "总结这个萌娘百科页面的主要内容"
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

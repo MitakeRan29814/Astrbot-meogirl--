@@ -1,0 +1,6 @@
+name: astrbot_plugin_moegirl
+display_name: 萌娘百科查询
+desc: 使用萌娘百科 MediaWiki API 搜索和读取词条
+version: v1.2.0
+author: Local developer
+repo: https://github.com/AstrBotDevs/AstrBot

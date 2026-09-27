@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "moegirl": {
+      "command": "python",
+      "cwd": ".",
+      "args": ["scripts/moegirl_server.py"],
+      "enabled": true,
+      "startup_timeout_sec": 20,
+      "tool_timeout_sec": 30
+    }
+  }
+}
